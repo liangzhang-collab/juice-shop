@@ -36,7 +36,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
     # Target (base) branches to scan. Adjust to your default/release branches.
-    branches: [main, master]
+    branches: [main, master, cm-main]
   pull_request_review_comment:
     types: [created]
   workflow_call:
