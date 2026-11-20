@@ -1,51 +1,14 @@
-# Copyright 2026 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
-# Governing: docs/openspec/specs/tech/components/github/spec.md#req-0002
-# Governing: docs/openspec/specs/tech/components/github/spec.md#req-0003
-# Governing: docs/openspec/specs/tech/components/github/spec.md#req-0007
-#
-# M1 (differential PR scan): every pull request runs `cm-runner init` +
-# `cm-runner find-diff`, uploads `report.sarif` and `report.md` as workflow
-# artifacts, and posts/updates one CodeMender PR comment with the findings.
-#
-# M2 (fixes): when the scan finds something in local container mode, the action
-# runs `cm-runner fix` for every finding in parallel gVisor containers and
-# posts each fix on the PR next to the code it changes. Each fix takes 10
-# minutes or more. Set `fix: false` below to turn fixes off.
-#
-# M3 (on-demand verification): when a repository collaborator replies
-# `@cm-runner verify` in a CodeMender fix thread, the action runs
-# `cm-runner verify` for that finding in a gVisor container and posts the
-# verification outcome in the thread.
-
 name: CodeMender
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    # Target (base) branches to scan. Adjust to your default/release branches.
     branches: [main, master, cm-main]
+  # Optional: uncomment to enable on-demand `@cm-runner verify` replies
   pull_request_review_comment:
     types: [created]
   workflow_call:
-  workflow_dispatch:
-
-# Isolate PR scans from per-thread on-demand verification runs.
-concurrency:
-  group: codemender-${{ github.event.pull_request.number || github.ref }}-${{ github.event.comment.in_reply_to_id || github.event.comment.id || 'scan' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_call' }}
+  workflow_dispatch:    
 
 permissions:
   actions: read         # Read prior PR scan artifacts when verifying a finding
@@ -57,78 +20,5 @@ permissions:
 
 jobs:
   codemender:
-    if: >-
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      (github.event_name == 'pull_request' ||
-       github.event_name == 'workflow_call' ||
-       (github.event.comment.in_reply_to_id != null &&
-        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
-        contains(github.event.comment.body, '@cm-runner verify')))
-    runs-on: ubuntu-latest
-    # Governing: docs/openspec/specs/tech/components/timeouts/spec.md#req-0003
-    # Layer 3 workflow ceiling (WORKFLOW_TIMEOUT_MINUTES = 60, aligned with the
-    # 3600s sandbox job ceiling and 1-hour GCP WIF credential lifetime).
-    timeout-minutes: 60
-    steps:
-      - name: Check CodeMender configuration
-        id: check-config
-        shell: bash
-        env:
-          GCP_PROJECT_ID: ${{ vars.CODEMENDER_GCP_PROJECT_ID }}
-          GCP_WIF_PROVIDER: ${{ secrets.CODEMENDER_WORKLOAD_IDENTITY_PROVIDER }}
-          GCP_SERVICE_ACCOUNT: ${{ secrets.CODEMENDER_SERVICE_ACCOUNT }}
-        run: |
-          if [[ -z "${GCP_PROJECT_ID// }" || -z "${GCP_WIF_PROVIDER// }" || -z "${GCP_SERVICE_ACCOUNT// }" ]]; then
-            echo "::notice::CodeMender is not configured for this repository (missing CODEMENDER_GCP_PROJECT_ID, CODEMENDER_WORKLOAD_IDENTITY_PROVIDER, or CODEMENDER_SERVICE_ACCOUNT); skipping scan."
-            # `exit 0` inside `run:` only exits this step's subshell (the runner still executes
-            # later steps), non-zero exit codes fail the PR check, and `secrets.*` cannot be
-            # referenced in job-level `if:` expressions, so subsequent steps gate on this output.
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      # Check out the target repository. `fetch-depth: 0` ensures the PR base
-      # commit is present locally for `cm-runner find-diff`, and
-      # `persist-credentials: false` keeps the GitHub token out of .git/config
-      # (ADR-0003).
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: steps.check-config.outputs.configured == 'true'
-        with:
-          # Check out the commented commit (for on-demand verify) or the PR head
-          # commit (for PR scans). By default, checkout puts a temporary merge
-          # commit on disk, so line numbers would not match the PR's "Files
-          # changed" view, where suggestions attach.
-          ref: ${{ github.event.comment.commit_id || github.event.pull_request.head.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Set up Python
-        if: steps.check-config.outputs.configured == 'true'
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.11'
-
-      - name: Pre-install workspace packages for self-testing
-        if: steps.check-config.outputs.configured == 'true'
-        shell: bash
-        run: |
-          if [[ -d "${GITHUB_WORKSPACE:-}/packages/artifactstore" ]]; then
-            python -m pip install --quiet \
-              "${GITHUB_WORKSPACE}/packages/artifactstore"
-          fi
-
-      # Mode 1: Cloud Run execution (default)
-      # In Cloud Run mode, all GCP infrastructure details are managed internally
-      # by the canonical Cloud Run client. No runner images or local gVisor required.
-      - uses: ./.github/actions/codemender # for local testing
-        if: steps.check-config.outputs.configured == 'true'
-        with:
-          gcp_project_id: ${{ vars.CODEMENDER_GCP_PROJECT_ID }}
-          gcp_workload_identity_provider: ${{ secrets.CODEMENDER_WORKLOAD_IDENTITY_PROVIDER }}
-          gcp_service_account: ${{ secrets.CODEMENDER_SERVICE_ACCOUNT }}
-          gcs_transit_bucket: ${{ vars.CODEMENDER_GCS_TRANSIT_BUCKET }}
-          cloud_run_job_name: ${{ vars.CODEMENDER_CLOUD_RUN_JOB_NAME }}
-          cloud_run_region: ${{ vars.CODEMENDER_GCP_REGION }}
-          # log_level: debug
-          # diff_workers: '8'
+    uses: liangzhang-collab/codemender-runner/.github/workflows/cm-merge-scan.yml@main
+    secrets: inherit
