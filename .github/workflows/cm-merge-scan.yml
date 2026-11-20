@@ -40,6 +40,7 @@ on:
   pull_request_review_comment:
     types: [created]
   workflow_call:
+  workflow_dispatch:
 
 # Isolate PR scans from per-thread on-demand verification runs.
 concurrency:
